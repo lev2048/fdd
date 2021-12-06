@@ -17,6 +17,7 @@ type EventLoop struct {
 	waitDone chan struct{}
 }
 
+//Create 创建Poller
 func Create() (*EventLoop, error) {
 	fd, err := unix.EpollCreate(kMaxEpollSize)
 	if err != nil {
@@ -30,6 +31,7 @@ func Create() (*EventLoop, error) {
 	}, nil
 }
 
+//Register 注册事件
 func (e *EventLoop) Register(fd int32, mod int, obj ISockNotify) error {
 	events := 0
 	e.handler[fd] = obj
@@ -45,6 +47,7 @@ func (e *EventLoop) Register(fd int32, mod int, obj ISockNotify) error {
 	})
 }
 
+//Modify 修改事件
 func (e *EventLoop) Modify(fd int32, mod int) error {
 	events := 0
 	if mod == kPollIn {
@@ -59,17 +62,18 @@ func (e *EventLoop) Modify(fd int32, mod int) error {
 	})
 }
 
+//UnRegister 销毁事件
 func (e *EventLoop) UnRegister(fd int32) error {
 	delete(e.handler, fd)
 	return unix.EpollCtl(e.fd, unix.EPOLL_CTL_DEL, int(fd), nil)
 }
 
+//Run 启动epoll wait 循环
 func (e *EventLoop) Run() {
 	defer close(e.waitDone)
 	events, timeout := make([]unix.EpollEvent, kEpollSize), 0
 	for !e.isStop {
 		nfds, err := unix.EpollWait(e.fd, events, timeout)
-		fmt.Println("xx:xx", nfds)
 		if err != nil && err != unix.EINTR {
 			fmt.Println("EpollWait: ", err)
 			continue
@@ -87,6 +91,7 @@ func (e *EventLoop) Run() {
 	}
 }
 
+//Close 关闭epoll
 func (e *EventLoop) Close() error {
 	e.isStop = true
 	select {
