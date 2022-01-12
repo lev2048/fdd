@@ -18,5 +18,5 @@ const (
 type Event uint32
 
 type ISockNotify interface {
-	HandleEvent(fd, event uint32)
+	HandleEvent(fd, event int)
 }

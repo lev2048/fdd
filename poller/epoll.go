@@ -32,32 +32,32 @@ func Create() (*EventLoop, error) {
 }
 
 //Register 注册事件
-func (e *EventLoop) Register(fd int32, mod int, obj ISockNotify) error {
+func (e *EventLoop) Register(fd int, mod int, obj ISockNotify) error {
 	events := 0
-	e.handler[fd] = obj
-	if mod == kPollIn {
+	e.handler[int32(fd)] = obj
+	if (mod & kPollIn) != 0 {
 		events = unix.EPOLLIN
 	}
-	if mod == kPollOut {
+	if (mod & kPollOut) != 0 {
 		events = unix.EPOLLOUT
 	}
 	return unix.EpollCtl(e.fd, unix.EPOLL_CTL_ADD, int(fd), &unix.EpollEvent{
-		Fd:     fd,
+		Fd:     int32(fd),
 		Events: uint32(events),
 	})
 }
 
 //Modify 修改事件
-func (e *EventLoop) Modify(fd int32, mod int) error {
-	events := 0
-	if mod == kPollIn {
-		events = unix.EPOLLIN
+func (e *EventLoop) Modify(fd int, mod int) error {
+	event := 0
+	if (mod & kPollIn) != 0 {
+		event = unix.EPOLLIN
 	}
-	if mod == kPollOut {
-		events = unix.EPOLLOUT
+	if (mod & kPollOut) != 0 {
+		event = unix.EPOLLOUT
 	}
 	return unix.EpollCtl(e.fd, unix.EPOLL_CTL_MOD, int(fd), &unix.EpollEvent{
-		Events: uint32(events),
+		Events: uint32(event),
 		Fd:     int32(fd),
 	})
 }
@@ -83,9 +83,11 @@ func (e *EventLoop) Run() {
 			continue
 		}
 		timeout = 0
-		for _, v := range events {
-			if obj, ok := e.handler[v.Fd]; ok {
-				obj.HandleEvent(uint32(v.Fd), v.Events)
+		for i := 0; i < nfds; i++ {
+			if obj, ok := e.handler[events[i].Fd]; ok {
+				obj.HandleEvent(int(events[i].Fd), int(events[i].Events))
+			} else {
+				fmt.Println("warn event", events[i].Fd)
 			}
 		}
 	}
