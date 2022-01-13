@@ -2,21 +2,21 @@ package pool
 
 type Job func()
 
-type Worker struct {
+type Pool struct {
 	WorkerPool chan chan Job
 	JobChannel chan Job
 	quit       chan bool
 }
 
-func NewWorker(pool chan chan Job) *Worker {
-	return &Worker{
+func NewPool(pool chan chan Job) *Pool {
+	return &Pool{
 		WorkerPool: pool,
 		JobChannel: make(chan Job),
 		quit:       make(chan bool),
 	}
 }
 
-func (w *Worker) Start() {
+func (w *Pool) Start() {
 	go func() {
 		for {
 			w.WorkerPool <- w.JobChannel
@@ -30,7 +30,7 @@ func (w *Worker) Start() {
 	}()
 }
 
-func (w *Worker) Stop() {
+func (w *Pool) Stop() {
 	w.quit <- true
 }
 
@@ -46,7 +46,7 @@ func NewDispatcher(maxWorkers int, maxQueue int) *Dispatcher {
 
 func (d *Dispatcher) Run() {
 	for i := 0; i <= d.WorkerCap; i++ {
-		worker := NewWorker(d.WorkerPool)
+		worker := NewPool(d.WorkerPool)
 		worker.Start()
 	}
 	go d.dispatch()
