@@ -39,10 +39,6 @@ func (tr *TCPRelay) AddToLoop(eventLoop *poller.EventLoop) bool {
 		log.Warn("already add to loop")
 		return false
 	}
-	if tr.isClose {
-		log.Warn("already closed")
-		return false
-	}
 	tr.eventLoop = eventLoop
 	if err := tr.eventLoop.Register(tr.serverSocket, kPollIn|kPollErr, tr); err != nil {
 		log.Warn("failed to register poller: ", err)

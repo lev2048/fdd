@@ -56,12 +56,26 @@ func (f *Fdd) Start(la string, lp int, ra string, rp int) {
 		log.Error("start EventLoop err: ", err)
 		return
 	}
+	cfg := Config{
+		ListenPort: lp,
+		RemotePort: rp,
+		ListenAddr: la,
+		RemoteAddr: ra,
+		UdpTimeOut: 50,
+		HandlerCap: 2048,
+	}
 	tcpServer, err := NewTCPRelay(la, lp, ra, rp, 1024)
 	if err != nil {
 		log.Error("start TcpServer err: ", err)
 		return
 	}
+	udpServer, err := NewUDPRelay(cfg)
+	if err != nil {
+		log.Error("start UdpServer err: ", err)
+		return
+	}
 	tcpServer.AddToLoop(eventLoop)
+	udpServer.AddToLoop(eventLoop)
 	go eventLoop.Run()
 }
 
