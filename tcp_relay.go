@@ -6,209 +6,140 @@ import (
 )
 
 type TCPRelay struct {
-	isClose      bool
-	listenAddr   string
-	remoteAddr   string
-	listenPort   int
-	remotePort   int
-	serverSocket int
+	localSocket int
 
+	cfg           *Config
 	eventLoop     *poller.EventLoop
 	socketHandler map[int]*TCPRelayHandler
 }
 
-// NewTCPRelay 创建TCP中继 la => 监听地址 eg: 0.0.0.0 lp => 监听端口 eg: 1080
-func NewTCPRelay(la string, lp int, ra string, rp int, cap int) (*TCPRelay, error) {
-	if fd, err := CreateTcpListenSocket(la, lp); err != nil {
+func NewTCPRelay(cfg *Config) (*TCPRelay, error) {
+	if fd, err := CreateTcpListenSocket(cfg.ListenAddr, cfg.ListenPort); err != nil {
 		return nil, err
 	} else {
 		return &TCPRelay{
-			isClose:       false,
-			listenAddr:    la,
-			listenPort:    lp,
-			remoteAddr:    ra,
-			remotePort:    rp,
-			serverSocket:  fd,
-			socketHandler: make(map[int]*TCPRelayHandler, cap),
+			cfg:           cfg,
+			localSocket:   fd,
+			socketHandler: make(map[int]*TCPRelayHandler, cfg.HandlerCap),
 		}, nil
 	}
 }
 
-func (tr *TCPRelay) AddToLoop(eventLoop *poller.EventLoop) bool {
-	if tr.eventLoop != nil {
-		log.Warn("already add to loop")
-		return false
-	}
-	tr.eventLoop = eventLoop
-	if err := tr.eventLoop.Register(tr.serverSocket, kPollIn|kPollErr, tr); err != nil {
-		log.Warn("failed to register poller: ", err)
-		return false
-	}
-	return true
+func (t *TCPRelay) AddToLoop(ep *poller.EventLoop) error {
+	t.eventLoop = ep
+	return t.eventLoop.Register(t.localSocket, kPollIn|kPollErr, t)
 }
 
-func (tr *TCPRelay) HandleEvent(fd, event int) {
+func (t *TCPRelay) HandleEvent(fd, ev int) {
 	if fd == INVALID_SOCKET {
-		log.Warn("invalid tcp listen socket")
-		return
-	}
-	if fd != tr.serverSocket {
-		log.Warn("invalid socket ", fd)
-		return
-	}
-	if event == kPollErr {
-		defer tr.Close()
-		tr.eventLoop.Close()
-		log.Error("KPollErr")
+		log.Warn("[tcp_relay] invalid tcp listen socket")
+	} else if ev == kPollErr {
+		log.Warn("[tcp_relay] handle event poll err: ", fd, ev)
+		defer t.Close()
 		return
 	}
 	if cfd, err := AcceptTcpConn(fd); err != nil {
-		log.Error("accept new tcp conn error: ", err)
+		log.Error("[tcp_relay] accept new tcp conn error: ", err)
 		return
 	} else {
 		defer SetNoBlock(cfd)
-		log.Info("create new tcphandler")
-		if rfd, err := CreateRemoteSocket(tr.remoteAddr, tr.remotePort); err != nil {
-			log.Warn("create new tcp remote conn error: ", err)
-			return
+		if rfd, err := CreateRemoteSocket(t.cfg.RemoteAddr, t.cfg.RemotePort); err != nil {
+			log.Warn("[tcp_relay] create new tcp conn error: ", err)
 		} else {
-			tcpRelayHandler := NewTCPRelayHandler(cfd, rfd, tr, tr.eventLoop)
-			if err := tr.eventLoop.Register(cfd, kPollIn|kPollErr, tcpRelayHandler); err != nil {
-				log.Warn("new tcp local socket add to eventlopp error: ", err)
+			tcpRelayHandler := NewTCPRelayHandler(cfd, rfd, t, t.eventLoop)
+			if err := t.eventLoop.Register(cfd, kPollIn|kPollErr, tcpRelayHandler); err != nil {
+				log.Warn("[tcp_relay] reg new local conn err: ", err)
 				return
 			}
-			if err := tr.eventLoop.Register(rfd, kPollOut|kPollErr, tcpRelayHandler); err != nil {
-				log.Warn("new tcp remote socket add to eventlopp error: ", err)
+			if err := t.eventLoop.Register(rfd, kPollIn|kPollErr, tcpRelayHandler); err != nil {
+				log.Warn("[tcp_relay] reg new remote conn err: ", err)
 				return
 			}
-			tr.socketHandler[cfd] = tcpRelayHandler
+			t.socketHandler[cfd] = tcpRelayHandler
 		}
 	}
 }
 
-func (tr *TCPRelay) Close() {
-	tr.isClose = true
-	if tr.eventLoop != nil {
-		tr.eventLoop.UnRegister(int32(tr.serverSocket))
+func (t *TCPRelay) Close() {
+	for k, v := range t.socketHandler {
+		v.Destroy()
+		delete(t.socketHandler, k)
 	}
-	if tr.serverSocket != INVALID_SOCKET {
-		CloseSocket(tr.serverSocket)
+	t.eventLoop.UnRegister(t.localSocket)
+	if t.localSocket != INVALID_SOCKET {
+		CloseSocket(t.localSocket)
 	}
+	log.Info("[tcp_relay] tcp relay service exit.")
 }
 
 type TCPRelayHandler struct {
-	localSocket       int
-	remoteSocket      int
-	upStreamStatus    int
-	downStreamStatus  int
-	dataWriteToLocal  []byte
-	dataWriteToRemote []byte
+	localSocket  int
+	remoteSocket int
 
-	server    *TCPRelay
+	flow      *Flow
 	eventLoop *poller.EventLoop
 }
 
-func NewTCPRelayHandler(lfd, rfd int, ser *TCPRelay, ep *poller.EventLoop) *TCPRelayHandler {
+func NewTCPRelayHandler(ls, rs int, ser *TCPRelay, ep *poller.EventLoop) *TCPRelayHandler {
 	return &TCPRelayHandler{
-		localSocket:       lfd,
-		remoteSocket:      rfd,
-		upStreamStatus:    kWaitStatusReadWriting,
-		downStreamStatus:  kWaitStatusReading,
-		dataWriteToLocal:  make([]byte, 0),
-		dataWriteToRemote: make([]byte, 0),
-		server:            ser,
-		eventLoop:         ep,
+		localSocket:  ls,
+		remoteSocket: rs,
+		flow:         NewFlow(ls, rs, ep),
+		eventLoop:    ep,
 	}
 }
 
-func (th *TCPRelayHandler) HandleEvent(fd, event int) {
+func (th *TCPRelayHandler) HandleEvent(fd, ev int) {
 	if fd == th.remoteSocket {
-		if (event & kPollErr) != 0 {
-			th.onError("remote")
-		}
-		if (event & (kPollIn | kPollHup)) != 0 {
+		if (ev & kPollErr) != 0 {
+			log.Warn("[tcp_handler]: handle remote event poll err: ", fd, ev)
+			th.Destroy()
+		} else if (ev & (kPollIn | kPollHup)) != 0 {
 			th.onRemoteRead()
-		}
-		if (event & kPollOut) != 0 {
+		} else if (ev & kPollOut) != 0 {
 			th.onRemoteWrite()
 		}
 	} else if fd == th.localSocket {
-		if (event & kPollErr) != 0 {
-			th.onError("local")
-		}
-		if (event & (kPollIn | kPollHup)) != 0 {
+		if (ev & kPollErr) != 0 {
+			log.Warn("[tcp_handler]: handle local event poll err: ", fd, ev)
+			th.Destroy()
+		} else if (ev & (kPollIn | kPollHup)) != 0 {
 			th.onLocalRead()
-		}
-		if (event & kPollOut) != 0 {
+		} else if (ev & kPollOut) != 0 {
 			th.onLocalWrite()
 		}
 	} else {
-		log.Warn("unkonwn socket")
+		log.Warn("[tcp_handler]: unkonwn socket")
 	}
 }
 
-func (th *TCPRelayHandler) updateStream(stream, status int) {
-	if stream == kStreamDown {
-		if th.downStreamStatus != status {
-			th.downStreamStatus = status
-		} else {
-			return
-		}
-	} else if stream == kStreamUp {
-		if th.upStreamStatus != status {
-			th.upStreamStatus = status
-		} else {
-			return
-		}
-	}
-	if th.localSocket != INVALID_SOCKET {
-		event := kPollErr
-		if (th.downStreamStatus & kWaitStatusWriting) != 0 {
-			event |= kPollOut
-		}
-		if th.upStreamStatus == kWaitStatusReading {
-			event |= kPollIn
-		}
-		th.eventLoop.Modify(th.localSocket, event)
-	}
-	if th.remoteSocket != INVALID_SOCKET {
-		event := kPollErr
-		if (th.downStreamStatus & kWaitStatusReading) != 0 {
-			event |= kPollIn
-		}
-		if (th.upStreamStatus & kWaitStatusWriting) != 0 {
-			event |= kPollOut
-		}
-		th.eventLoop.Modify(th.remoteSocket, event)
-	}
-}
-
-func (th *TCPRelayHandler) writeToSock(fd int, data []byte) {
-	if len(data) == 0 || fd == INVALID_SOCKET {
+func (th *TCPRelayHandler) writeToSock(fd int, data *[]byte) {
+	if len(*data) == 0 || fd == INVALID_SOCKET {
 		return
 	}
 	uncomplete := false
-	if _, err := BufferSend(fd, &data); err != nil {
+	if _, err := BufferSend(fd, data); err != nil {
 		if err == unix.EAGAIN {
 			uncomplete = true
 		} else {
+			log.Warn("[tcp_handler] send buffer err: ", err)
 			th.Destroy()
 			return
 		}
 	}
 	if uncomplete {
 		if fd == th.localSocket {
-			th.dataWriteToLocal = append(th.dataWriteToLocal, data...)
-			th.updateStream(kStreamDown, kWaitStatusWriting)
+			th.flow.DataWriteToLocal = append(th.flow.DataWriteToLocal, *data...)
+			th.flow.Update(kStreamDown, kWaitStatusWriting)
 		} else if fd == th.remoteSocket {
-			th.dataWriteToRemote = append(th.dataWriteToRemote, data...)
-			th.updateStream(kStreamUp, kWaitStatusWriting)
+			th.flow.DataWriteToRemote = append(th.flow.DataWriteToRemote, *data...)
+			th.flow.Update(kStreamUp, kWaitStatusWriting)
 		}
 	} else {
 		if fd == th.localSocket {
-			th.updateStream(kStreamDown, kWaitStatusReading)
+			th.flow.Update(kStreamDown, kWaitStatusReading)
 		} else if fd == th.remoteSocket {
-			th.updateStream(kStreamUp, kWaitStatusReading)
+			th.flow.Update(kStreamUp, kWaitStatusReading)
 		}
 	}
 }
@@ -219,71 +150,59 @@ func (th *TCPRelayHandler) onLocalRead() {
 		if err == unix.EAGAIN {
 			return
 		} else if err != nil {
-			log.Warn("onLocalReadError: ", err)
-		}
-		if n == 0 {
-			log.Info("local conn close. ")
+			log.Warn("[tcp_handler]: on local read err: ", err)
 		}
 		th.Destroy()
 	} else {
 		buf = buf[:n]
-		th.writeToSock(th.remoteSocket, buf)
+		th.writeToSock(th.remoteSocket, &buf)
 	}
 }
 
 func (th *TCPRelayHandler) onRemoteRead() {
-	buf := make([]byte, kUpStreamBufSize)
+	buf := make([]byte, kDownStreamBufSize)
 	if n, err := BufferRecv(th.remoteSocket, &buf); err != nil || n == 0 {
 		if err == unix.EAGAIN {
 			return
 		} else if err != nil {
-			log.Warn("onLocalReadError: ", err)
-		}
-		if n == 0 {
-			log.Info("local conn close. ")
+			log.Warn("[tcp_handler] on remote read err: ", err)
 		}
 		th.Destroy()
 	} else {
 		buf = buf[:n]
-		th.writeToSock(th.localSocket, buf)
+		th.writeToSock(th.localSocket, &buf)
 	}
 }
 
 func (th *TCPRelayHandler) onLocalWrite() {
-	if len(th.dataWriteToLocal) != 0 {
-		data := th.dataWriteToLocal
-		th.dataWriteToLocal = make([]byte, 0)
-		th.writeToSock(th.localSocket, data)
+	if len(th.flow.DataWriteToLocal) != 0 {
+		data := th.flow.DataWriteToLocal
+		th.flow.DataWriteToLocal = make([]byte, 0, kDownStreamBufSize)
+		th.writeToSock(th.localSocket, &data)
 		return
 	}
-	th.updateStream(kStreamDown, kWaitStatusReading)
+	th.flow.Update(kStreamDown, kWaitStatusReading)
 }
 
 func (th *TCPRelayHandler) onRemoteWrite() {
-	if len(th.dataWriteToRemote) != 0 {
-		data := th.dataWriteToRemote
-		th.dataWriteToRemote = make([]byte, 0)
-		th.writeToSock(th.remoteSocket, data)
+	if len(th.flow.DataWriteToRemote) != 0 {
+		data := th.flow.DataWriteToRemote
+		th.flow.DataWriteToRemote = make([]byte, 0)
+		th.writeToSock(th.remoteSocket, &data)
 		return
 	}
-	th.updateStream(kStreamUp, kWaitStatusReading)
-}
-
-func (th *TCPRelayHandler) onError(stream string) {
-	log.Error("got " + " error")
-	th.Destroy()
+	th.flow.Update(kStreamUp, kWaitStatusReading)
 }
 
 func (th *TCPRelayHandler) Destroy() {
 	if th.remoteSocket != INVALID_SOCKET {
-		th.eventLoop.UnRegister(int32(th.remoteSocket))
+		th.eventLoop.UnRegister(th.remoteSocket)
 		CloseSocket(th.remoteSocket)
 		th.remoteSocket = INVALID_SOCKET
 	}
 	if th.localSocket != INVALID_SOCKET {
-		th.eventLoop.UnRegister(int32(th.localSocket))
+		th.eventLoop.UnRegister(th.localSocket)
 		CloseSocket(th.localSocket)
 		th.localSocket = INVALID_SOCKET
 	}
-	delete(th.server.socketHandler, th.localSocket)
 }

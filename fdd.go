@@ -1,41 +1,12 @@
 package fdd
 
 import (
+	"errors"
 	"os"
 
 	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/rocinan/fdd/poller"
 	"github.com/sirupsen/logrus"
-)
-
-const (
-	kStreamUp int = iota
-	kStreamDown
-)
-
-const (
-	kWaitStatusInit = iota
-	kWaitStatusReading
-	kWaitStatusWriting
-	kWaitStatusReadWriting = kWaitStatusReading | kWaitStatusWriting
-)
-
-const (
-	kUpStreamBufSize   = 16384
-	kDownStreamBufSize = 32768
-)
-
-const (
-	kPollNull = 0x00
-	kPollIn   = 0x01
-	kPollOut  = 0x04
-	kPollErr  = 0x08
-	kPollHup  = 0x10
-	kPollNval = 0x20
-)
-
-const (
-	INVALID_SOCKET = -1
 )
 
 var log = logrus.New()
@@ -48,15 +19,18 @@ func init() {
 	log.SetOutput(os.Stdout)
 }
 
-type Fdd struct{}
+type Fdd struct {
+	tcpServer *TCPRelay
+	udpServer *UDPRelay
+	eventLoop *poller.EventLoop
+}
 
-func (f *Fdd) Start(la string, lp int, ra string, rp int) {
-	eventLoop, err := poller.Create()
+func (f *Fdd) Start(la string, lp int, ra string, rp int) (err error) {
+	f.eventLoop, err = poller.Create()
 	if err != nil {
-		log.Error("start EventLoop err: ", err)
-		return
+		return err
 	}
-	cfg := Config{
+	cfg := &Config{
 		ListenPort: lp,
 		RemotePort: rp,
 		ListenAddr: la,
@@ -64,19 +38,27 @@ func (f *Fdd) Start(la string, lp int, ra string, rp int) {
 		UdpTimeOut: 50,
 		HandlerCap: 2048,
 	}
-	tcpServer, err := NewTCPRelay(la, lp, ra, rp, 1024)
+	f.tcpServer, err = NewTCPRelay(cfg)
 	if err != nil {
-		log.Error("start TcpServer err: ", err)
-		return
+		return errors.New("start TcpServer err: " + err.Error())
 	}
-	udpServer, err := NewUDPRelay(cfg)
+	f.udpServer, err = NewUDPRelay(cfg)
 	if err != nil {
-		log.Error("start UdpServer err: ", err)
-		return
+		return errors.New("start TcpServer err: " + err.Error())
 	}
-	tcpServer.AddToLoop(eventLoop)
-	udpServer.AddToLoop(eventLoop)
-	go eventLoop.Run()
+	f.tcpServer.AddToLoop(f.eventLoop)
+	f.udpServer.AddToLoop(f.eventLoop)
+	go f.eventLoop.Run()
+	return nil
 }
 
-func (f *Fdd) Stop() {}
+func (f *Fdd) Stop() {
+	log.Info("fdd: stop ...")
+	f.tcpServer.Close()
+	f.udpServer.Close()
+	if err := f.eventLoop.Close(); err != nil {
+		log.Warn(err)
+	}
+	log.Info("[eventLoop] poller exit.")
+	log.Info("fdd: stop server done.")
+}

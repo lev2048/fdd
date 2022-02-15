@@ -13,7 +13,7 @@ import (
 type EventLoop struct {
 	fd       int
 	isStop   bool
-	handler  map[int32]ISockNotify
+	handler  map[int]ISockNotify
 	waitDone chan struct{}
 }
 
@@ -26,7 +26,7 @@ func Create() (*EventLoop, error) {
 	return &EventLoop{
 		fd:       fd,
 		isStop:   false,
-		handler:  make(map[int32]ISockNotify, kEpollSize),
+		handler:  make(map[int]ISockNotify, kEpollSize),
 		waitDone: make(chan struct{}),
 	}, nil
 }
@@ -34,7 +34,7 @@ func Create() (*EventLoop, error) {
 //Register 注册事件
 func (e *EventLoop) Register(fd int, mod int, obj ISockNotify) error {
 	events := 0
-	e.handler[int32(fd)] = obj
+	e.handler[fd] = obj
 	if (mod & kPollIn) != 0 {
 		events = unix.EPOLLIN
 	}
@@ -63,9 +63,9 @@ func (e *EventLoop) Modify(fd int, mod int) error {
 }
 
 //UnRegister 销毁事件
-func (e *EventLoop) UnRegister(fd int32) error {
+func (e *EventLoop) UnRegister(fd int) error {
 	delete(e.handler, fd)
-	return unix.EpollCtl(e.fd, unix.EPOLL_CTL_DEL, int(fd), nil)
+	return unix.EpollCtl(e.fd, unix.EPOLL_CTL_DEL, fd, nil)
 }
 
 //Run 启动epoll wait 循环
@@ -75,7 +75,6 @@ func (e *EventLoop) Run() {
 	for !e.isStop {
 		nfds, err := unix.EpollWait(e.fd, events, timeout)
 		if err != nil && err != unix.EINTR {
-			fmt.Println("EpollWait: ", err)
 			continue
 		}
 		if nfds <= 0 {
@@ -84,10 +83,11 @@ func (e *EventLoop) Run() {
 		}
 		timeout = 0
 		for i := 0; i < nfds; i++ {
-			if obj, ok := e.handler[events[i].Fd]; ok {
+			if obj, ok := e.handler[int(events[i].Fd)]; ok {
 				obj.HandleEvent(int(events[i].Fd), int(events[i].Events))
 			} else {
-				fmt.Println("warn event", events[i].Fd)
+				//todo log
+				fmt.Println("warn event", events[i].Fd, events[i].Events)
 			}
 		}
 	}

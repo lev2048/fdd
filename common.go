@@ -85,6 +85,14 @@ func CreateUdpRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 	}
 }
 
+func CheckError(pf string, err error) bool {
+	if err != nil {
+		log.Warn(pf, err)
+		return false
+	}
+	return true
+}
+
 func BufferSend(fd int, buffer *[]byte) (int, error) {
 	return unix.Write(fd, *buffer)
 }
