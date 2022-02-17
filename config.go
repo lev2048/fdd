@@ -1,12 +1,13 @@
 package fdd
 
 type Config struct {
-	ListenPort int
-	RemotePort int
-	UdpTimeOut int
-	HandlerCap int
-	ListenAddr string
-	RemoteAddr string
+	ListenPort   int
+	RemotePort   int
+	UdpTimeOut   int
+	HandlerCap   int
+	ListenAddr   string
+	RemoteAddr   string
+	TargetDomain string
 }
 
 func NewConfig(la, ra string, lp, rp, hcp, timeout int) Config {

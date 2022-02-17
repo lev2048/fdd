@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/shuLhan/share/lib/dns"
 	"golang.org/x/sys/unix"
 )
 
@@ -69,12 +70,6 @@ func CreateRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 	}
 }
 
-func SockAddrParse(addr string, port int) unix.SockaddrInet4 {
-	sa := unix.SockaddrInet4{Port: port}
-	copy(sa.Addr[:], net.ParseIP(addr).To4())
-	return sa
-}
-
 //CreateRemoteSocket 创建udp socketFD
 func CreateUdpRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 	if fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP); err != nil {
@@ -83,6 +78,12 @@ func CreateUdpRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 		defer SetNoBlock(fd)
 		return fd, nil
 	}
+}
+
+func SockAddrParse(addr string, port int) unix.SockaddrInet4 {
+	sa := unix.SockaddrInet4{Port: port}
+	copy(sa.Addr[:], net.ParseIP(addr).To4())
+	return sa
 }
 
 func CheckError(pf string, err error) bool {
@@ -125,4 +126,25 @@ func CloseSocket(fd int) error {
 func MD5Addr(addr []byte, port int) string {
 	sum := md5.Sum(append(addr, []byte(strconv.Itoa(port))...))
 	return hex.EncodeToString(sum[:])
+}
+
+func GetDomainIp(domain string) (string, error) {
+	dot, err := dns.NewDoTClient("223.5.5.5:853", true)
+	if err != nil {
+		return "", err
+	}
+	defer dot.Close()
+	res, err := dot.Lookup(dns.MessageQuestion{
+		Name: domain,
+		Type: dns.RecordTypeA,
+	}, false)
+	if err != nil {
+		return "", err
+	}
+	for _, v := range res.Answer {
+		if v.Type != 5 {
+			return v.Value.(string), nil
+		}
+	}
+	return "", nil
 }
