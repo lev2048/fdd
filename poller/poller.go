@@ -1,9 +1,8 @@
 package poller
 
 const (
-	kEpollSize        = 1024
-	kMaxEpollSize     = 102400
-	kTimeoutPrecision = 10
+	kEpollSize    = 1024
+	kMaxEpollSize = 102400
 )
 
 const (
@@ -19,4 +18,8 @@ type Event uint32
 
 type ISockNotify interface {
 	HandleEvent(fd, event int)
+}
+
+func Judge(v int) bool {
+	return v != 0
 }

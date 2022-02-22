@@ -89,23 +89,27 @@ func NewTCPRelayHandler(ls, rs int, ser *TCPRelay, ep *poller.EventLoop) *TCPRel
 	}
 }
 
-func (th *TCPRelayHandler) HandleEvent(fd, ev int) {
-	if fd == th.remoteSocket {
-		if (ev & kPollErr) != 0 {
-			log.Warn("[tcp_handler]: handle remote event poll err: ", fd, ev)
+func (th *TCPRelayHandler) HandleEvent(s, ev int) {
+	if s == th.remoteSocket {
+		if Judge(ev & kPollErr) {
+			log.Warn("[tcp_handler]: handle remote event poll err: ", s, ev)
 			th.Destroy()
-		} else if (ev & (kPollIn | kPollHup)) != 0 {
+		}
+		if Judge(ev & (kPollIn | kPollHup)) {
 			th.onRemoteRead()
-		} else if (ev & kPollOut) != 0 {
+		}
+		if Judge(ev & kPollOut) {
 			th.onRemoteWrite()
 		}
-	} else if fd == th.localSocket {
-		if (ev & kPollErr) != 0 {
-			log.Warn("[tcp_handler]: handle local event poll err: ", fd, ev)
+	} else if s == th.localSocket {
+		if Judge(ev & kPollErr) {
+			log.Warn("[tcp_handler]: handle local event poll err: ", s, ev)
 			th.Destroy()
-		} else if (ev & (kPollIn | kPollHup)) != 0 {
+		}
+		if Judge(ev & (kPollIn | kPollHup)) {
 			th.onLocalRead()
-		} else if (ev & kPollOut) != 0 {
+		}
+		if Judge(ev & kPollOut) {
 			th.onLocalWrite()
 		}
 	} else {
@@ -113,12 +117,12 @@ func (th *TCPRelayHandler) HandleEvent(fd, ev int) {
 	}
 }
 
-func (th *TCPRelayHandler) writeToSock(fd int, data *[]byte) {
-	if len(*data) == 0 || fd == INVALID_SOCKET {
+func (th *TCPRelayHandler) writeToSock(s int, data *[]byte) {
+	if len(*data) == 0 || s == INVALID_SOCKET {
 		return
 	}
 	uncomplete := false
-	if _, err := BufferSend(fd, data); err != nil {
+	if ret, err := BufferSend(s, data); err != nil {
 		if err == unix.EAGAIN {
 			uncomplete = true
 		} else {
@@ -126,19 +130,22 @@ func (th *TCPRelayHandler) writeToSock(fd int, data *[]byte) {
 			th.Destroy()
 			return
 		}
+	} else if ret >= 0 && ret < len(*data) {
+		uncomplete = true
+		*data = (*data)[ret:]
 	}
 	if uncomplete {
-		if fd == th.localSocket {
+		if s == th.localSocket {
 			th.flow.DataWriteToLocal = append(th.flow.DataWriteToLocal, *data...)
 			th.flow.Update(kStreamDown, kWaitStatusWriting)
-		} else if fd == th.remoteSocket {
+		} else if s == th.remoteSocket {
 			th.flow.DataWriteToRemote = append(th.flow.DataWriteToRemote, *data...)
 			th.flow.Update(kStreamUp, kWaitStatusWriting)
 		}
 	} else {
-		if fd == th.localSocket {
+		if s == th.localSocket {
 			th.flow.Update(kStreamDown, kWaitStatusReading)
-		} else if fd == th.remoteSocket {
+		} else if s == th.remoteSocket {
 			th.flow.Update(kStreamUp, kWaitStatusReading)
 		}
 	}
@@ -146,7 +153,7 @@ func (th *TCPRelayHandler) writeToSock(fd int, data *[]byte) {
 
 func (th *TCPRelayHandler) onLocalRead() {
 	buf := make([]byte, kUpStreamBufSize)
-	if n, err := BufferRecv(th.localSocket, &buf); err != nil || n == 0 {
+	if n, err := BufferRecv(th.localSocket, &buf); err != nil || n <= 0 {
 		if err == unix.EAGAIN {
 			return
 		} else if err != nil {
@@ -161,7 +168,7 @@ func (th *TCPRelayHandler) onLocalRead() {
 
 func (th *TCPRelayHandler) onRemoteRead() {
 	buf := make([]byte, kDownStreamBufSize)
-	if n, err := BufferRecv(th.remoteSocket, &buf); err != nil || n == 0 {
+	if n, err := BufferRecv(th.remoteSocket, &buf); err != nil || n <= 0 {
 		if err == unix.EAGAIN {
 			return
 		} else if err != nil {

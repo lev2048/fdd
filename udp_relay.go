@@ -5,18 +5,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type LocalData struct {
-	data []byte
-	dest unix.SockaddrInet4
-}
-
 type UDPRelay struct {
 	localSocket int
 
-	cfg              *Config
-	eventLoop        *poller.EventLoop
-	socketHandler    map[string]*UDPRelayHandler
-	dataWriteToLocal []LocalData
+	cfg           *Config
+	eventLoop     *poller.EventLoop
+	remoteSocket  map[int]unix.SockaddrInet4
+	remoteSrcAddr map[string]int
 }
 
 func NewUDPRelay(cfg *Config) (*UDPRelay, error) {
@@ -24,200 +19,91 @@ func NewUDPRelay(cfg *Config) (*UDPRelay, error) {
 		return nil, err
 	} else {
 		return &UDPRelay{
-			cfg:              cfg,
-			localSocket:      fd,
-			socketHandler:    make(map[string]*UDPRelayHandler, cfg.HandlerCap),
-			dataWriteToLocal: make([]LocalData, 0, kDownStreamBufSize),
+			cfg:           cfg,
+			localSocket:   fd,
+			remoteSocket:  make(map[int]unix.SockaddrInet4, cfg.HandlerCap),
+			remoteSrcAddr: make(map[string]int, cfg.HandlerCap),
 		}, nil
 	}
 }
 
-func (u *UDPRelay) AddToLoop(ep *poller.EventLoop) error {
-	u.eventLoop = ep
-	return u.eventLoop.Register(u.localSocket, kPollIn|kPollErr, u)
+func (ur *UDPRelay) AddToLoop(ep *poller.EventLoop) error {
+	ur.eventLoop = ep
+	return ur.eventLoop.Register(ur.localSocket, kPollIn|kPollErr, ur)
 }
 
-func (u *UDPRelay) HandleEvent(fd, ev int) {
-	if (ev & kPollErr) != 0 {
-		log.Warn("[udp_relay]: handle event poll err: ", fd, ev)
-		defer u.Close()
-	} else if (ev & (kPollIn | kPollHup)) != 0 {
-		u.onLocalRead()
-	} else if (ev & kPollOut) != 0 {
-		u.onLocalWrite()
-	} else {
-		log.Warn("[udp_realy]: handle event err: ", fd, ev)
-	}
-}
-
-func (u *UDPRelay) onLocalRead() {
-	var handler *UDPRelayHandler
-	buf := make([]byte, kBuffSize)
-	n, sa, err := PacketRecv(u.localSocket, &buf)
-	if ok := CheckError("[udp_realay] on local read err: ", err); !ok {
-		return
-	}
-	if uh, ok := u.socketHandler[MD5Addr(sa.Addr[:], sa.Port)]; !ok {
-		serverSocket, err := CreateUdpRemoteSocket(u.cfg.RemoteAddr, u.cfg.RemotePort)
-		if ok := CheckError("[udp_realay] create handler err: ", err); !ok {
+func (ur *UDPRelay) HandleEvent(s, ev int) {
+	if s == ur.localSocket {
+		if Judge(ev & kPollErr) {
+			log.Warn("[UDPRelay] client socket event err: ", s, ev)
 			return
 		}
-		handler = NewUDPRealyHandler(u.localSocket, serverSocket, unix.SockaddrInet4{
-			Addr: sa.Addr,
-			Port: sa.Port,
-		}, SockAddrParse(u.cfg.RemoteAddr, u.cfg.RemotePort), u.eventLoop)
-		u.socketHandler[MD5Addr(sa.Addr[:], sa.Port)] = handler
-		u.eventLoop.Register(handler.remoteSocket, kPollIn|kPollErr, handler)
-	} else {
-		handler = uh
-	}
-	buf = buf[:n]
-	handler.SendToRemote(&buf)
-}
-
-func (u *UDPRelay) onLocalWrite() {
-	if len(u.dataWriteToLocal) != 0 {
-		pkt := u.dataWriteToLocal
-		u.dataWriteToLocal = make([]LocalData, 0, kDownStreamBufSize)
-		for _, v := range pkt {
-			u.SendToLocal(u.localSocket, &v.data, &v.dest)
-		}
-		return
-	}
-	CheckError("[udp_relay] on local write err: ", u.eventLoop.Modify(u.localSocket, kPollIn|kPollErr))
-}
-
-func (u *UDPRelay) SendToLocal(fd int, p *[]byte, sa *unix.SockaddrInet4) {
-	uncomplete := false
-	if len(*p) == 0 || fd == INVALID_SOCKET {
-		log.Warn("[udp_relay] send pkg to local err: ", len(*p), fd)
-		return
-	}
-	if err := PacketSend(fd, p, sa); err != nil {
-		if err == unix.EAGAIN {
-			uncomplete = true
-		} else {
-			log.Error("[udp_relay] send pkg to local err: ", err)
-			u.Close()
-			return
+		ur.handleClient()
+	} else if s != INVALID_SOCKET {
+		if _, ok := ur.remoteSocket[s]; ok {
+			if Judge(ev & kPollErr) {
+				log.Warn("[UDPRealy] socket event err: ", s, ev)
+				ur.eventLoop.UnRegister(s)
+				return
+			}
+			ur.handleRemote(s)
 		}
 	}
-	if uncomplete {
-		u.dataWriteToLocal = append(u.dataWriteToLocal, LocalData{
-			dest: *sa,
-			data: *p,
-		})
-		u.eventLoop.Modify(u.localSocket, kWaitStatusReadWriting)
-	} else {
-		u.eventLoop.Modify(u.localSocket, kWaitStatusReading)
-	}
 }
 
-func (u *UDPRelay) Close() {
-	for k, v := range u.socketHandler {
-		v.Destroy()
-		delete(u.socketHandler, k)
-	}
-	u.eventLoop.UnRegister(u.localSocket)
-	if u.localSocket != INVALID_SOCKET {
-		CloseSocket(u.localSocket)
-	}
-	log.Info("[udp_relay] udp relay service exit.")
-}
-
-type UDPRelayHandler struct {
-	localSocket  int
-	remoteSocket int
-
-	flow      *Flow
-	src       unix.SockaddrInet4
-	dest      unix.SockaddrInet4
-	eventLoop *poller.EventLoop
-}
-
-func NewUDPRealyHandler(ls, rs int, src, dest unix.SockaddrInet4, ev *poller.EventLoop) *UDPRelayHandler {
-	return &UDPRelayHandler{
-		src:          src,
-		dest:         dest,
-		flow:         NewFlow(ls, rs, ev),
-		eventLoop:    ev,
-		localSocket:  ls,
-		remoteSocket: rs,
-	}
-}
-
-func (uh *UDPRelayHandler) HandleEvent(fd, ev int) {
-	if (ev & kPollErr) != 0 {
-		log.Warn("[udp_handler]: handle event poll err: ", fd, ev)
-		uh.Destroy()
-	} else if (ev & (kPollIn | kPollHup)) != 0 {
-		uh.onRemoteRead()
-	} else if (ev & kPollOut) != 0 {
-		uh.onRemoteWrite()
-	} else {
-		log.Warn("[udp_handler]: handle event err: ", fd, ev)
-	}
-}
-
-func (uh *UDPRelayHandler) onRemoteRead() {
+func (ur *UDPRelay) handleClient() {
 	buf := make([]byte, kBuffSize)
-	n, _, err := PacketRecv(uh.remoteSocket, &buf)
-	if ok := CheckError("[udp_handler] recv packet error: ", err); !ok {
-		uh.Destroy()
+	n, sa, err := PacketRecv(ur.localSocket, &buf)
+	if ok := CheckError("[UDPRelay] on local read err: ", err); !ok {
 		return
 	}
 	buf = buf[:n]
-	uh.sendToSock(uh.localSocket, &buf, &uh.src)
-}
-
-func (uh *UDPRelayHandler) onRemoteWrite() {
-	if len(uh.flow.DataWriteToRemote) != 0 {
-		pkt := uh.flow.DataWriteToRemote
-		uh.flow.DataWriteToRemote = make([]byte, 0)
-		uh.sendToSock(uh.remoteSocket, &pkt, &uh.dest)
-		return
-	}
-	uh.flow.Update(kStreamUp, kWaitStatusReading)
-}
-
-func (uh *UDPRelayHandler) SendToRemote(pkt *[]byte) {
-	uh.sendToSock(uh.remoteSocket, pkt, &uh.dest)
-}
-
-func (uh *UDPRelayHandler) sendToSock(fd int, p *[]byte, sa *unix.SockaddrInet4) {
-	if len(*p) == 0 || fd == INVALID_SOCKET {
-		return
-	}
-	uncomplete := false
-	if err := PacketSend(fd, p, sa); err != nil {
-		if err == unix.EAGAIN {
-			uncomplete = true
-		} else {
-			uh.Destroy()
+	remoteSocket := 0
+	if s, ok := ur.remoteSrcAddr[MD5Addr(sa.Addr[:], sa.Port)]; !ok {
+		log.Info("[UDPRelay] new client : ", Addr2Str(sa))
+		if ns, err := CreateUdpRemoteSocket(); err != nil {
+			log.Error("[UDPRelay] create remote socket err: ", err)
 			return
-		}
-	}
-	if uncomplete {
-		if fd == uh.localSocket {
-			uh.flow.DataWriteToLocal = append(uh.flow.DataWriteToLocal, *p...)
-			uh.flow.Update(kStreamDown, kWaitStatusWriting)
-		} else if fd == uh.remoteSocket {
-			uh.flow.DataWriteToRemote = append(uh.flow.DataWriteToRemote, *p...)
-			uh.flow.Update(kStreamUp, kWaitStatusWriting)
+		} else {
+			remoteSocket = ns
+			ur.remoteSocket[ns] = *sa
+			ur.remoteSrcAddr[MD5Addr(sa.Addr[:], sa.Port)] = ns
+			ur.eventLoop.Register(ns, kPollIn, ur)
 		}
 	} else {
-		if fd == uh.localSocket {
-			uh.flow.Update(kStreamDown, kWaitStatusReading)
-		} else if fd == uh.remoteSocket {
-			uh.flow.Update(kStreamUp, kWaitStatusReading)
+		remoteSocket = s
+	}
+	if err := PacketSend(remoteSocket, &buf, SockAddrParse(ur.cfg.RemoteAddr, ur.cfg.RemotePort)); err != nil {
+		if err == unix.EAGAIN {
+			log.Warn("[UDPRelay] send pkg to remote err: EAGAIN")
+		} else {
+			log.Error("[udp_relay] send pkg to remote err: ", err)
 		}
 	}
+
 }
 
-func (uh *UDPRelayHandler) Destroy() {
-	if uh.remoteSocket != INVALID_SOCKET {
-		uh.eventLoop.UnRegister(uh.remoteSocket)
-		CloseSocket(uh.remoteSocket)
-		uh.remoteSocket = INVALID_SOCKET
+func (ur *UDPRelay) handleRemote(s int) {
+	buf, src := make([]byte, kBuffSize), ur.remoteSocket[s]
+	n, _, err := PacketRecv(s, &buf)
+	if ok := CheckError("[UDPRelay] on remote read err: ", err); !ok {
+		return
 	}
+	buf = buf[:n]
+	CheckError("[UDPRelay] on send pkg to local err: ", PacketSend(ur.localSocket, &buf, &src))
+}
+
+func (ur *UDPRelay) Close() {
+	for s := range ur.remoteSocket {
+		ur.eventLoop.UnRegister(s)
+		if s != INVALID_SOCKET {
+			CloseSocket(s)
+		}
+		delete(ur.remoteSocket, s)
+	}
+	ur.eventLoop.UnRegister(ur.localSocket)
+	if ur.localSocket != INVALID_SOCKET {
+		CloseSocket(ur.localSocket)
+	}
+	log.Info("[UDPRelay] udp relay service exit.")
 }

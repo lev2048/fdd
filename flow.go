@@ -17,7 +17,7 @@ const (
 )
 
 const (
-	kBuffSize          = 16 * 1024
+	kBuffSize          = 65536
 	kUpStreamBufSize   = 16 * 1024
 	kDownStreamBufSize = 32 * 1024
 )
@@ -76,20 +76,20 @@ func (f *Flow) Update(flow, status int) error {
 	}
 	if f.localSocket != INVALID_SOCKET {
 		event := kPollErr
-		if (f.DownStatus & kWaitStatusWriting) != 0 {
+		if Judge(f.DownStatus & kWaitStatusWriting) {
 			event |= kPollOut
 		}
-		if f.UpStatus == kWaitStatusReading {
+		if Judge(f.UpStatus & kWaitStatusReading) {
 			event |= kPollIn
 		}
 		f.eventloop.Modify(f.localSocket, event)
 	}
 	if f.remoteSocket != INVALID_SOCKET {
 		event := kPollErr
-		if (f.DownStatus & kWaitStatusReading) != 0 {
+		if Judge(f.DownStatus & kWaitStatusReading) {
 			event |= kPollIn
 		}
-		if (f.UpStatus & kWaitStatusWriting) != 0 {
+		if Judge(f.UpStatus & kWaitStatusWriting) {
 			event |= kPollOut
 		}
 		f.eventloop.Modify(f.remoteSocket, event)

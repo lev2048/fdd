@@ -3,6 +3,7 @@ package fdd
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"strconv"
 
@@ -35,7 +36,7 @@ func CreateUdpListenSocket(addr string, port int) (int, error) {
 	if fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP); err != nil {
 		return 0, err
 	} else {
-		SetNoBlock(fd)
+		defer SetNoBlock(fd)
 		SetReUseAddr(fd)
 		socketAddr := unix.SockaddrInet4{Port: port}
 		copy(socketAddr.Addr[:], net.ParseIP(addr).To4())
@@ -71,8 +72,8 @@ func CreateRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 }
 
 //CreateRemoteSocket 创建udp socketFD
-func CreateUdpRemoteSocket(remoteAddr string, remotePort int) (int, error) {
-	if fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP); err != nil {
+func CreateUdpRemoteSocket() (int, error) {
+	if fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0); err != nil {
 		return 0, err
 	} else {
 		defer SetNoBlock(fd)
@@ -80,8 +81,8 @@ func CreateUdpRemoteSocket(remoteAddr string, remotePort int) (int, error) {
 	}
 }
 
-func SockAddrParse(addr string, port int) unix.SockaddrInet4 {
-	sa := unix.SockaddrInet4{Port: port}
+func SockAddrParse(addr string, port int) *unix.SockaddrInet4 {
+	sa := &unix.SockaddrInet4{Port: port}
 	copy(sa.Addr[:], net.ParseIP(addr).To4())
 	return sa
 }
@@ -107,7 +108,7 @@ func PacketSend(fd int, p *[]byte, sa *unix.SockaddrInet4) error {
 }
 
 func PacketRecv(fd int, p *[]byte) (int, *unix.SockaddrInet4, error) {
-	n, _, _, from, err := unix.Recvmsg(fd, *p, nil, 0)
+	n, from, err := unix.Recvfrom(fd, *p, 0)
 	return n, from.(*unix.SockaddrInet4), err
 }
 
@@ -147,4 +148,12 @@ func GetDomainIp(domain string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func Judge(v int) bool {
+	return v != 0
+}
+
+func Addr2Str(sa *unix.SockaddrInet4) string {
+	return fmt.Sprintf("%d.%d.%d.%d:%d", sa.Addr[0], sa.Addr[1], sa.Addr[2], sa.Addr[3], sa.Port)
 }
